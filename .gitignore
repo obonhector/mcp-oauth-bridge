@@ -1,0 +1,8 @@
+node_modules/
+state/
+servers.json
+*.token
+.env
+.env.*
+._*
+.DS_Store
