@@ -20,6 +20,7 @@ const asJson = argv.includes('--json');
 const dirIndex = argv.indexOf('--dir');
 const root = dirIndex === -1 ? '/tmp/cp/plugins-main/third_party' : argv[dirIndex + 1];
 
+/** @type {Array<[string, string]>} */
 const targets = [];
 for (const dir of readdirSync(root)) {
   try {
@@ -37,7 +38,7 @@ async function probe([name, url]) {
     const info = await discoverOAuthServerInfo(url, {
       fetchFn: (u, init) => fetch(u, { ...init, signal: AbortSignal.timeout(10000) }),
     });
-    const metadata = info.authorizationServerMetadata ?? {};
+    const metadata = /** @type {any} */ (info.authorizationServerMetadata ?? {});
     return {
       name,
       url,
@@ -51,11 +52,16 @@ async function probe([name, url]) {
   }
 }
 
+/** @type {any[]} */
 const results = [];
 const queue = [...targets];
 await Promise.all(
   Array.from({ length: 8 }, async () => {
-    while (queue.length) results.push(await probe(queue.shift()));
+    while (queue.length) {
+    const target = queue.shift();
+    if (!target) break;
+    results.push(await probe(target));
+  }
   }),
 );
 
