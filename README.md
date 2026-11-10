@@ -391,6 +391,8 @@ bridge starts degraded and reports a clear error on `tools/list`; run
 
 ## Development
 
+See [RELEASING.md](RELEASING.md) for the npm trusted-publishing setup and the tag/release checklist.
+
 ```bash
 npm ci
 npm test           # e2e + store/notify, against a local mock OAuth/MCP server
