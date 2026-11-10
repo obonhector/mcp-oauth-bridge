@@ -4,7 +4,7 @@
  * No network beyond the local mock OAuth server.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +30,7 @@ console.log('▶ file backend');
   const be = selectBackend({ store: 'file' });
   const f = path.join(root, 'state', 'a.json');
   be.write(f, { tokens: { access_token: 'x' } }, 'a');
-  const mode = (readFileSync(f), spawnSync('stat', ['-c', '%a', f]).stdout.toString().trim());
+  const mode = (statSync(f).mode & 0o777).toString(8).padStart(3, '0');
   check('file escribe 0600', mode === '600', mode);
   check('file lee de vuelta', be.read(f, 'a').tokens.access_token === 'x');
   check('fileStore exportado', fileStore.name === 'file');
