@@ -21,6 +21,7 @@ import {
   run,
   startMock,
   testEnv,
+  waitFor,
 } from './helpers.mjs';
 
 const results = [];
@@ -148,6 +149,7 @@ async function main() {
       const stats = await mock.stats();
       check(results, 'refresh_token grant was used', stats.refreshes >= 1, JSON.stringify(stats));
       await proxy.client.close();
+      await waitFor(() => !existsSync(path.join(dir, 'state', 'core.lock')));
 
       result = await run(['status', 'core', '--verify', '--json'], { env, timeout: 15_000 });
       const verified = JSON.parse(result.stdout || '{}');

@@ -165,3 +165,13 @@ export function finish(results) {
 export function cleanup(dir) {
   rmSync(dir, { recursive: true, force: true });
 }
+
+/** Poll a predicate (e.g. wait for a serve lock to be released). */
+export async function waitFor(predicate, timeout = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (await predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
