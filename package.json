@@ -1,19 +1,46 @@
 {
-  "name": "mcp-oauth-bridge",
-  "version": "1.1.0",
-  "description": "OAuth bridge exposing OAuth-protected remote MCP servers to DeepSeek Harness over stdio",
-  "scripts": {
-    "test": "node test/e2e.mjs && node test/store-notify.mjs"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "UNLICENSED",
+  "name": "oauth-mcp-bridge",
+  "version": "1.0.0",
+  "description": "Expose OAuth-protected remote MCP servers to any stdio-only MCP client (PKCE, dynamic client registration, token refresh, multi-server).",
   "type": "module",
+  "bin": {
+    "oauth-mcp-bridge": "bridge.mjs"
+  },
+  "files": [
+    "bridge.mjs",
+    "lib/"
+  ],
+  "scripts": {
+    "test": "node test/e2e.mjs && node test/store-notify.mjs",
+    "scan": "node tools/scan-servers.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "oauth",
+    "pkce",
+    "bridge",
+    "stdio",
+    "agents",
+    "llm"
+  ],
+  "author": "Hector Obon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obonhector/mcp-oauth-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/obonhector/mcp-oauth-bridge/issues"
+  },
+  "homepage": "https://github.com/obonhector/mcp-oauth-bridge#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1"
-  },
-  "private": true,
-  "bin": {
-    "mcp-oauth-bridge": "bridge.mjs"
   }
 }

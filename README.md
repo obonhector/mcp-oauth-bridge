@@ -1,4 +1,65 @@
-# Puente OAuth MCP para DeepSeek Harness
+# oauth-mcp-bridge
+
+**Your MCP client speaks stdio. The remote MCP server wants OAuth. This bridges them.**
+
+It performs the MCP OAuth dance once — resource metadata discovery (RFC 9728),
+dynamic client registration (RFC 7591), authorization code with PKCE S256
+(RFC 7636), resource indicator (RFC 8707) — stores the tokens, refreshes them on
+401, and then exposes the remote server to your client over plain stdio. Multiple
+servers, one process, no secrets in your config files.
+
+## Install
+
+```bash
+# no install needed
+npx oauth-mcp-bridge add todoist https://ai.todoist.net/mcp
+npx oauth-mcp-bridge login todoist          # opens your browser, listens on 127.0.0.1:33418
+npx oauth-mcp-bridge serve todoist          # stdio MCP server your client can spawn
+```
+
+Or globally: `npm i -g oauth-mcp-bridge`.
+
+Works with any stdio client (Claude Desktop, Cursor, DSH, custom agents). Then
+point the client at the `serve` command:
+
+```json
+{
+  "mcpServers": {
+    "todoist": {
+      "command": "npx",
+      "args": ["-y", "oauth-mcp-bridge", "serve", "todoist"]
+    }
+  }
+}
+```
+
+```bash
+oauth-mcp-bridge status todoist   # tokens, expiry, scopes
+oauth-mcp-bridge tools todoist    # list tools
+oauth-mcp-bridge login todoist --headless   # no browser on the box? paste the redirect URL back
+oauth-mcp-bridge serve-all        # every authorized server, prefixed by name
+oauth-mcp-bridge logout todoist
+```
+
+**Measured coverage** (`npm run scan`): of 78 remote endpoints listed in the
+Cursor MCP marketplace, **57 work with zero configuration** (metadata + dynamic
+client registration): ahrefs, calendly, coda, gamma, gong, hunter, intercom,
+jotform, klaviyo, square, statsig, todoist, trello, typeform, upwork and more.
+20 need your own OAuth app (`--client-id`/`--client-secret`); 1 has malformed
+metadata.
+
+**Security**: tokens live in `~/.dsh/mcp-oauth/state/<name>.json` at mode `0600`
+inside a `0700` directory, or in 1Password/libsecret if you prefer — never in the
+client config. PKCE verifier never leaves the machine, `state` is validated,
+callback binds to `127.0.0.1` only.
+
+MIT licensed. Node >= 20.
+
+---
+
+## Detalle en español: por qué existe
+
+Puente OAuth MCP para DeepSeek Harness (DSH).
 
 DSH habla MCP por **stdio** y por **streamable-http con cabeceras estáticas**; no
 tiene flujo OAuth. Comprobado en el código del plugin que trae el propio harness:
