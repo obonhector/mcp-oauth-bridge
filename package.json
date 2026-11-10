@@ -1,29 +1,44 @@
 {
   "name": "oauth-mcp-bridge",
-  "version": "1.0.0",
-  "description": "Expose OAuth-protected remote MCP servers to any stdio-only MCP client (PKCE, dynamic client registration, token refresh, multi-server).",
+  "version": "1.1.0",
+  "description": "OAuth for stdio-only MCP clients: PKCE, dynamic client registration, token refresh, pluggable token stores and multi-server proxying.",
   "type": "module",
   "bin": {
     "oauth-mcp-bridge": "bridge.mjs"
   },
   "files": [
     "bridge.mjs",
-    "lib/"
+    "lib/",
+    "docs/providers.md",
+    "docs/coverage.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "scripts": {
     "test": "node test/e2e.mjs && node test/store-notify.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:store": "node test/store-notify.mjs",
+    "test:pack": "node test/pack.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "scan": "node tools/scan-servers.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "keywords": [
     "mcp",
     "model-context-protocol",
     "oauth",
+    "oauth2",
     "pkce",
+    "dynamic-client-registration",
     "bridge",
+    "proxy",
     "stdio",
+    "claude",
+    "cursor",
+    "dsh",
     "agents",
     "llm"
   ],
@@ -31,16 +46,24 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/obonhector/mcp-oauth-bridge.git"
+    "url": "git+https://github.com/obonhector/oauth-mcp-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/obonhector/mcp-oauth-bridge/issues"
+    "url": "https://github.com/obonhector/oauth-mcp-bridge/issues"
   },
-  "homepage": "https://github.com/obonhector/mcp-oauth-bridge#readme",
+  "homepage": "https://github.com/obonhector/oauth-mcp-bridge#readme",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0",
+    "typescript": "^5.6.0"
   }
 }

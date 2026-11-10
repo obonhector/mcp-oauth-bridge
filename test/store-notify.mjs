@@ -1,241 +1,228 @@
 #!/usr/bin/env node
 /**
- * Unit tests for pluggable stores, notify hook, and serve-all wiring.
- * No network beyond the local mock OAuth server.
+ * Unit/integration tests for stores, notify, secrets and logout on every backend.
+ * The op/libsecret sections use fake CLIs and are skipped on Windows.
  */
-import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { selectBackend, itemTitle, fileStore } from '../lib/store.mjs';
-import { notify } from '../lib/notify.mjs';
+import { itemTitle, selectBackend } from '../lib/store.mjs';
+import { notify, resetNotifications } from '../lib/notify.mjs';
+import {
+  check,
+  finish,
+  loginFlow,
+  makeStateDir,
+  run,
+  startMock,
+  testEnv,
+} from './helpers.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BRIDGE = path.join(HERE, '..', 'bridge.mjs');
-const MOCK = path.join(HERE, 'mock-oauth-server.mjs');
 const results = [];
-const check = (name, ok, detail = '') => {
-  results.push({ name, ok, detail });
-  console.log(`${ok ? '  ✅' : '  ❌'} ${name}${detail ? ` — ${detail}` : ''}`);
-};
-
+const POSIX = process.platform !== 'win32';
 const root = mkdtempSync(path.join(tmpdir(), 'mcp-oauth-store-'));
-const fakeBin = path.join(root, 'bin');
-mkdirSync(fakeBin);
+const binDir = path.join(root, 'bin');
+mkdirSync(binDir);
+process.on('exit', () => rmSync(root, { recursive: true, force: true }));
 
-/* ---------- file backend ---------- */
+/* ------------------------------------------------------------------ */
+/* file backend                                                        */
+/* ------------------------------------------------------------------ */
 console.log('▶ file backend');
 {
-  const be = selectBackend({ store: 'file' });
-  const f = path.join(root, 'state', 'a.json');
-  be.write(f, { tokens: { access_token: 'x' } }, 'a');
-  const mode = (statSync(f).mode & 0o777).toString(8).padStart(3, '0');
-  check('file escribe 0600', mode === '600', mode);
-  check('file lee de vuelta', be.read(f, 'a').tokens.access_token === 'x');
-  check('fileStore exportado', fileStore.name === 'file');
+  const backend = selectBackend({ store: 'file' });
+  const id = { name: 'todoist', file: path.join(root, 'state', 'todoist.json') };
+  await backend.write(id, { tokens: { access_token: 'x' }, clientSecret: 's' });
+  check(results, 'file writes and reads', (await backend.read(id)).tokens.access_token === 'x');
+  if (POSIX) {
+    const mode = (statSync(id.file).mode & 0o777).toString(8).padStart(3, '0');
+    check(results, 'file is 0600', mode === '600', mode);
+  }
+  const leftovers = readdirSync(path.dirname(id.file)).filter((name) => name.includes('.tmp'));
+  check(results, 'file writes atomically (no temp files)', leftovers.length === 0, leftovers.join(','));
+  await backend.delete(id);
+  check(results, 'file delete removes the file', !existsSync(id.file));
+  check(results, 'file read returns undefined when missing', (await backend.read(id)) === undefined);
+
+  writeFileSync(id.file, '{bad state');
+  let error;
+  try {
+    await backend.read(id);
+  } catch (caught) {
+    error = caught;
+  }
+  check(results, 'corrupt state throws a clear StoreError', /not valid JSON/i.test(error?.message || ''), error?.message);
 }
 
-/* ---------- 1Password mock ---------- */
-console.log('▶ op backend (mock CLI)');
-{
+/* ------------------------------------------------------------------ */
+/* op backend (fake CLI)                                               */
+/* ------------------------------------------------------------------ */
+const fakeOp = path.join(binDir, 'op');
+if (POSIX) {
+  writeFileSync(
+    fakeOp,
+    `#!/usr/bin/env node
+const fs=require('fs'),path=require('path');const v=process.env.VAULT;
+const a=process.argv.slice(2);
+const list=()=>{try{return JSON.parse(fs.readFileSync(path.join(v,'i.json'),'utf8'))}catch{return[]}};
+const save=l=>fs.writeFileSync(path.join(v,'i.json'),JSON.stringify(l));
+if(a[0]==='item'&&a[1]==='list'){console.log(JSON.stringify(list()));process.exit(0)}
+if(a[0]==='item'&&a[1]==='get'){const h=list().find(i=>i.title===a[2]);if(!h)process.exit(1);console.log(h.state);process.exit(0)}
+if(a[0]==='item'&&a[1]==='create'){const t=a[a.indexOf('--title')+1];const s=a.find(x=>x.startsWith('state=')).slice(6);const l=list();l.push({title:t,state:s});save(l);process.exit(0)}
+if(a[0]==='item'&&a[1]==='edit'){const l=list(),h=l.find(i=>i.title===a[2]);if(!h)process.exit(1);h.state=a.find(x=>x.startsWith('state=')).slice(6);save(l);process.exit(0)}
+if(a[0]==='item'&&a[1]==='delete'){const l=list().filter(i=>i.title!==a[2]);save(l);process.exit(0)}
+process.stderr.write('unknown '+a.join(' '));process.exit(1)
+`,
+    { mode: 0o755 },
+  );
+  chmodSync(fakeOp, 0o755);
+}
+
+if (POSIX) {
+  console.log('▶ op backend (fake CLI)');
   const vault = path.join(root, 'op-vault');
   mkdirSync(vault);
-  const op = path.join(fakeBin, 'op');
-  writeFileSync(op, `#!/usr/bin/env node
-const fs=require('fs'); const path=require('path');
-const vault=${JSON.stringify(vault)};
-const args=process.argv.slice(2);
-function list(){ try{return JSON.parse(fs.readFileSync(path.join(vault,'index.json'),'utf8'));}catch{return[];} }
-function save(list){ fs.writeFileSync(path.join(vault,'index.json'), JSON.stringify(list)); }
-if(args[0]==='item'&&args[1]==='list'){ process.stdout.write(JSON.stringify(list())); process.exit(0); }
-if(args[0]==='item'&&args[1]==='get'){
-  const title=args[2]; const hit=list().find(i=>i.title===title);
-  if(!hit){ process.stderr.write('not found'); process.exit(1); }
-  process.stdout.write(hit.state); process.exit(0);
-}
-if(args[0]==='item'&&args[1]==='create'){
-  const title=args[args.indexOf('--title')+1];
-  const assignment=args.find(a=>a.startsWith('state='));
-  const state=assignment.slice('state='.length);
-  const items=list(); items.push({title, state}); save(items); process.exit(0);
-}
-if(args[0]==='item'&&args[1]==='edit'){
-  const title=args[2]; const assignment=args.find(a=>a.startsWith('state='));
-  const items=list(); const hit=items.find(i=>i.title===title);
-  if(!hit){ process.stderr.write('not found'); process.exit(1); }
-  hit.state=assignment.slice('state='.length); save(items); process.exit(0);
-}
-process.stderr.write('unknown '+args.join(' ')); process.exit(1);
-`, { mode: 0o755 });
-  chmodSync(op, 0o755);
-  process.env.DSH_MCP_OAUTH_OP_BIN = op;
-  process.env.DSH_MCP_OAUTH_OP_VAULT = 'test';
-  const be = selectBackend({ store: 'op' });
-  be.write(null, { tokens: { access_token: 'from-op' }, clientInformation: { client_id: 'c' } }, 'todoist');
-  const round = be.read(null, 'todoist');
-  check('op create + get roundtrip', round.tokens?.access_token === 'from-op');
-  be.write(null, { tokens: { access_token: 'updated' } }, 'todoist');
-  check('op edit roundtrip', be.read(null, 'todoist').tokens.access_token === 'updated');
-  check('itemTitle sanitiza', itemTitle('todoist') === 'mcp-oauth:todoist');
+  process.env.MCP_OAUTH_BRIDGE_OP_BIN = fakeOp;
+  process.env.MCP_OAUTH_BRIDGE_OP_VAULT = 'test';
+  process.env.VAULT = vault;
+  const backend = selectBackend({ store: 'op' });
+  const id = { name: 'todoist', file: path.join(root, 'state', 'todoist.json') };
+  await backend.write(id, { tokens: { access_token: 'from-op' }, clientInformation: { client_id: 'c' } });
+  check(results, 'op create + read roundtrip', (await backend.read(id)).tokens?.access_token === 'from-op');
+  await backend.write(id, { tokens: { access_token: 'updated' } });
+  check(results, 'op edit roundtrip', (await backend.read(id)).tokens.access_token === 'updated');
+  check(results, 'op describe names the item', /mcp-oauth:todoist/.test(backend.describe(id)));
+  check(results, 'itemTitle sanitizes', itemTitle('todoist') === 'mcp-oauth:todoist');
   let threw = false;
-  try { itemTitle('../evil'); } catch { threw = true; }
-  check('itemTitle rechaza nombres raros', threw);
+  try {
+    itemTitle('../evil');
+  } catch {
+    threw = true;
+  }
+  check(results, 'itemTitle rejects bad names', threw);
+
+  const mock = await startMock({ MOCK_ACCESS_TTL: '60' });
+  const stateDir = makeStateDir();
+  const env = testEnv(stateDir, {
+    MCP_OAUTH_BRIDGE_OP_BIN: fakeOp,
+    MCP_OAUTH_BRIDGE_OP_VAULT: 'test',
+    VAULT: vault,
+  });
+  try {
+    await run(['add', 'opmock', mock.url, '--store', 'op'], { env });
+    const login = await loginFlow({ name: 'opmock', env });
+    check(results, 'op login works', login.code === 0, `code=${login.code}`);
+    const opId = { name: 'opmock', file: path.join(stateDir, 'state', 'opmock.json') };
+    const opState = await backend.read(opId);
+    check(results, 'op stores tokens after login', Boolean(opState?.tokens?.refresh_token));
+    let logout = await run(['logout', 'opmock', '--no-revoke'], { env });
+    check(results, 'op logout exits 0', logout.code === 0, logout.stderr.trim().split('\n').pop());
+    const after = await backend.read(opId);
+    check(results, 'op logout removes tokens from the backend', !after?.tokens);
+    await run(['logout', 'opmock', '--forget-client', '--no-revoke'], { env });
+    check(results, 'op --forget-client deletes the item', (await backend.read(opId)) === undefined);
+  } finally {
+    await mock.stop();
+  }
+} else {
+  console.log('▶ op backend (skipped on win32)');
 }
 
-/* ---------- libsecret mock ---------- */
-console.log('▶ libsecret backend (mock secret-tool)');
-{
-  const store = path.join(root, 'secret.json');
-  writeFileSync(store, '{}');
-  const st = path.join(fakeBin, 'secret-tool');
-  writeFileSync(st, `#!/usr/bin/env node
-const fs=require('fs'); const store=${JSON.stringify(store)};
+/* ------------------------------------------------------------------ */
+/* libsecret backend (fake CLI)                                        */
+/* ------------------------------------------------------------------ */
+if (POSIX) {
+  console.log('▶ libsecret backend (fake CLI)');
+  const secretStore = path.join(root, 'secret-store.json');
+  writeFileSync(secretStore, '{}');
+  const fakeSecret = path.join(binDir, 'secret-tool');
+  writeFileSync(
+    fakeSecret,
+    `#!/usr/bin/env node
+const fs=require('fs');const store=process.env.SECRET_STORE;
 const args=process.argv.slice(2);
-const data=JSON.parse(fs.readFileSync(store,'utf8'));
-if(args[0]==='lookup'){
-  const server=args[args.indexOf('server')+1];
-  if(!data[server]) process.exit(1);
-  process.stdout.write(data[server]); process.exit(0);
-}
-if(args[0]==='store'){
-  const server=args[args.indexOf('server')+1];
-  let body=''; process.stdin.on('data',d=>body+=d); process.stdin.on('end',()=>{ data[server]=body; fs.writeFileSync(store,JSON.stringify(data)); });
-  return;
-}
-process.exit(1);
-`, { mode: 0o755 });
-  chmodSync(st, 0o755);
-  process.env.DSH_MCP_OAUTH_SECRET_BIN = st;
-  const be = selectBackend({ store: 'libsecret' });
-  be.write(null, { tokens: { access_token: 'ks' } }, 'ks-server');
-  // wait a tick for stdin drain in child
-  await new Promise((r) => setTimeout(r, 50));
-  check('libsecret roundtrip', be.read(null, 'ks-server').tokens?.access_token === 'ks');
+const data=()=>{try{return JSON.parse(fs.readFileSync(store,'utf8'))}catch{return{}}};
+const save=d=>fs.writeFileSync(store,JSON.stringify(d));
+if(args[0]==='lookup'){const s=args[args.indexOf('server')+1];const d=data();if(!d[s])process.exit(1);process.stdout.write(d[s]);process.exit(0)}
+if(args[0]==='store'){const s=args[args.indexOf('server')+1];let b='';process.stdin.on('data',x=>b+=x);process.stdin.on('end',()=>{const d=data();d[s]=b;save(d)});return;}
+if(args[0]==='clear'){const s=args[args.indexOf('server')+1];const d=data();delete d[s];save(d);process.exit(0)}
+process.exit(1)
+`,
+    { mode: 0o755 },
+  );
+  chmodSync(fakeSecret, 0o755);
+  process.env.MCP_OAUTH_BRIDGE_SECRET_BIN = fakeSecret;
+  process.env.SECRET_STORE = secretStore;
+  const backend = selectBackend({ store: 'libsecret' });
+  const id = { name: 'todoist', file: '' };
+  await backend.write(id, { tokens: { access_token: 'from-keyring' } });
+  check(results, 'libsecret roundtrip', (await backend.read(id)).tokens.access_token === 'from-keyring');
+  check(results, 'libsecret describe names the entry', /libsecret/.test(backend.describe(id)));
+
+  const mock = await startMock({ MOCK_ACCESS_TTL: '60' });
+  const stateDir = makeStateDir();
+  const env = testEnv(stateDir, {
+    MCP_OAUTH_BRIDGE_SECRET_BIN: fakeSecret,
+    SECRET_STORE: secretStore,
+  });
+  try {
+    await run(['add', 'lsmock', mock.url, '--store', 'libsecret'], { env });
+    const login = await loginFlow({ name: 'lsmock', env });
+    check(results, 'libsecret login works', login.code === 0, `code=${login.code}`);
+    const stored = await backend.read({ name: 'lsmock', file: '' });
+    check(results, 'libsecret stores tokens after login', Boolean(stored?.tokens?.refresh_token));
+    const logout = await run(['logout', 'lsmock', '--no-revoke'], { env });
+    check(results, 'libsecret logout exits 0', logout.code === 0, logout.stderr.trim().split('\n').pop());
+    const after = await backend.read({ name: 'lsmock', file: '' });
+    check(results, 'libsecret logout removes tokens', !after?.tokens);
+    await run(['logout', 'lsmock', '--forget-client', '--no-revoke'], { env });
+    check(results, 'libsecret --forget-client deletes the entry', (await backend.read({ name: 'lsmock', file: '' })) === undefined);
+  } finally {
+    await mock.stop();
+  }
+} else {
+  console.log('▶ libsecret backend (skipped on win32)');
 }
 
-/* ---------- notify ---------- */
+/* ------------------------------------------------------------------ */
+/* notify hook                                                         */
+/* ------------------------------------------------------------------ */
 console.log('▶ notify hook');
 {
   const logFile = path.join(root, 'notify.log');
+  const sink = path.join(root, 'notify-sink.mjs');
+  writeFileSync(
+    sink,
+    `import { appendFileSync } from 'node:fs';
+const values = [
+  process.env.MCP_OAUTH_BRIDGE_EVENT,
+  process.env.MCP_OAUTH_BRIDGE_SERVER,
+  process.env.MCP_OAUTH_BRIDGE_MESSAGE,
+  process.env.MCP_OAUTH_EVENT,
+  process.env.MCP_OAUTH_SERVER,
+  process.env.MCP_OAUTH_MESSAGE,
+];
+appendFileSync(process.argv[2], values.join('|') + '\\n');
+`,
+  );
+  const command = `"${process.execPath}" "${sink}" "${logFile}"`;
+  process.env.MCP_OAUTH_BRIDGE_NOTIFY_CMD = command;
+  resetNotifications();
   const logs = [];
-  process.env.DSH_MCP_OAUTH_NOTIFY_CMD = `printf '%s|%s|%s\\n' "$MCP_OAUTH_EVENT" "$MCP_OAUTH_SERVER" "$MCP_OAUTH_MESSAGE" >> ${JSON.stringify(logFile).slice(1, -1)}`;
-  // fix: use shell-safe path
-  process.env.DSH_MCP_OAUTH_NOTIFY_CMD = `printf '%s|%s|%s\\n' "$MCP_OAUTH_EVENT" "$MCP_OAUTH_SERVER" "$MCP_OAUTH_MESSAGE" >> '${logFile}'`;
-  await notify('refresh_failed', 'todoist', 'token caducado', { log: (m) => logs.push(m) });
-  await notify('refresh_failed', 'todoist', 'otra vez', { log: (m) => logs.push(m) }); // dedup
-  await new Promise((r) => setTimeout(r, 100));
-  const body = readFileSync(logFile, 'utf8').trim().split('\n');
-  check('notify escribe al comando', body[0] === 'refresh_failed|todoist|token caducado', body[0]);
-  check('notify deduplica por (server,event)', body.length === 1, String(body.length));
-  check('notify loguea el mensaje', logs.some((l) => /token caducado/.test(l)));
+  await notify('refresh_failed', 'todoist', 'token expired', { log: (line) => logs.push(line) });
+  await notify('refresh_failed', 'todoist', 'again', { log: (line) => logs.push(line) });
+  const lines = readFileSync(logFile, 'utf8').trim().split('\n');
+  check(results, 'notify runs the command', lines[0] === 'refresh_failed|todoist|token expired|refresh_failed|todoist|token expired', lines[0]);
+  check(results, 'notify deduplicates (server,event)', lines.length === 1, String(lines.length));
+  check(results, 'notify logs locally', logs.some((line) => /token expired/.test(line)));
+
+  delete process.env.MCP_OAUTH_BRIDGE_NOTIFY_CMD;
+  process.env.DSH_MCP_OAUTH_NOTIFY_CMD = command;
+  resetNotifications();
+  await notify('reauth_required', 'legacy', 'legacy hook', { log: () => {} });
+  const legacyLines = readFileSync(logFile, 'utf8').trim().split('\n');
+  check(results, 'legacy DSH_* notify variable still works', legacyLines.at(-1)?.startsWith('reauth_required|legacy|legacy hook'), legacyLines.at(-1));
   delete process.env.DSH_MCP_OAUTH_NOTIFY_CMD;
 }
 
-/* ---------- serve-all against mock ---------- */
-console.log('▶ serve-all');
-{
-  const stateDir = mkdtempSync(path.join(tmpdir(), 'mcp-oauth-all-'));
-  const env = { ...process.env, DSH_MCP_OAUTH_DIR: stateDir, DSH_MCP_OAUTH_NO_OPEN: '1' };
-  delete env.DSH_MCP_OAUTH_STORE;
-  delete env.DSH_MCP_OAUTH_OP_BIN;
-  const mock = spawn(process.execPath, [MOCK], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const port = await new Promise((resolve, reject) => {
-    let b = ''; const t = setTimeout(() => reject(new Error('mock')), 10000);
-    mock.stdout.on('data', (d) => { b += d; const m = b.match(/PORT=(\d+)/); if (m) { clearTimeout(t); resolve(+m[1]); } });
-  });
-  const mcpUrl = `http://127.0.0.1:${port}/mcp`;
-  const run = (args) => new Promise((resolve) => {
-    const c = spawn(process.execPath, [BRIDGE, ...args], { env });
-    let stdout = '', stderr = '';
-    c.stdout.on('data', (d) => (stdout += d)); c.stderr.on('data', (d) => (stderr += d));
-    c.on('close', (code) => resolve({ code, stdout, stderr }));
-  });
-  await run(['add', 'a', mcpUrl]);
-  await run(['add', 'b', mcpUrl]);
-  // login a only
-  const child = spawn(process.execPath, [BRIDGE, 'login', 'a', '--no-open', '--skip-verify'], { env });
-  const authUrl = await new Promise((resolve, reject) => {
-    let e = ''; const t = setTimeout(() => reject(new Error('no url')), 15000);
-    child.stderr.on('data', (d) => { e += d; const m = e.match(/AUTHORIZATION_URL=(\S+)/); if (m) { clearTimeout(t); resolve(m[1]); } });
-  });
-  const r = await fetch(authUrl, { redirect: 'manual' });
-  await fetch(r.headers.get('location'));
-  await new Promise((res) => child.on('close', res));
-
-  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-  const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
-  const transport = new StdioClientTransport({ command: process.execPath, args: [BRIDGE, 'serve-all', '--only', 'a,b'], env, stderr: 'pipe' });
-  const client = new Client({ name: 'e2e-all', version: '1.0.0' }, { capabilities: {} });
-  let bridgeErr = '';
-  transport.stderr?.on('data', (d) => (bridgeErr += d));
-  await client.connect(transport);
-  const tools = await client.listTools();
-  const names = tools.tools.map((t) => t.name).sort();
-  check('serve-all prefija tools con el servidor', names.includes('a__echo') && names.includes('a__server_time'), names.join(','));
-  check('serve-all omite el servidor no autorizado', !names.some((n) => n.startsWith('b__')), names.join(','));
-  check('serve-all reporta el omitido', /b.*sin autorizar|b.*requiere|b.*login/.test(bridgeErr), bridgeErr.split('\n').filter((l) => /\[b\]/.test(l)).join(' | '));
-  const echoed = await client.callTool({ name: 'a__echo', arguments: { text: 'all' } });
-  check('serve-all proxya tools/call', echoed.content?.[0]?.text === 'echo: all');
-  await client.close();
-  mock.kill();
-  rmSync(stateDir, { recursive: true, force: true });
-}
-
-/* ---------- headless paste-back ---------- */
-console.log('▶ login --headless --paste-back');
-{
-  const stateDir = mkdtempSync(path.join(tmpdir(), 'mcp-oauth-headless-'));
-  const env = { ...process.env, DSH_MCP_OAUTH_DIR: stateDir, DSH_MCP_OAUTH_NO_OPEN: '1' };
-  const mock = spawn(process.execPath, [MOCK], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  const port = await new Promise((resolve, reject) => {
-    let b = ''; const t = setTimeout(() => reject(new Error('mock')), 10000);
-    mock.stdout.on('data', (d) => { b += d; const m = b.match(/PORT=(\d+)/); if (m) { clearTimeout(t); resolve(+m[1]); } });
-  });
-  const mcpUrl = `http://127.0.0.1:${port}/mcp`;
-  spawnSync(process.execPath, [BRIDGE, 'add', 'h', mcpUrl], { env });
-  const child = spawn(process.execPath, [BRIDGE, 'login', 'h', '--headless', '--paste-back', '--skip-verify'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
-  let stderr = '';
-  let authUrl;
-  await new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('no auth url\n' + stderr)), 15000);
-    child.stderr.on('data', (d) => {
-      stderr += d;
-      const m = stderr.match(/AUTHORIZATION_URL=(\S+)/);
-      if (m && !authUrl) authUrl = m[1];
-      if (/URL de redirección:/.test(stderr) && authUrl) { clearTimeout(t); resolve(); }
-    });
-  });
-  const authorized = await fetch(authUrl, { redirect: 'manual' });
-  const location = authorized.headers.get('location');
-  check('authorize emitió redirect', Boolean(location), String(authorized.status));
-  child.stdin.write(location + '\n');
-  child.stdin.end();
-  const code = await new Promise((res) => child.on('close', res));
-  check('paste-back login termina 0', code === 0, `code=${code}\n${stderr}`);
-  check('paste-back guardó tokens', /access_token: sí/.test(stderr));
-
-  console.log('▶ refresh fallido -> error claro + notify');
-  const statePath = path.join(stateDir, 'state', 'h.json');
-  const st = JSON.parse(readFileSync(statePath, 'utf8'));
-  st.tokens.access_token = 'at-revoked';
-  st.tokens.refresh_token = 'rt-revoked';
-  writeFileSync(statePath, JSON.stringify(st));
-  const notifyLog = path.join(stateDir, 'notify.log');
-  const res = spawnSync(process.execPath, [BRIDGE, 'serve', 'h'], {
-    env: { ...env, DSH_MCP_OAUTH_NOTIFY_CMD: `printf '%s|%s\\n' "$MCP_OAUTH_EVENT" "$MCP_OAUTH_SERVER" >> '${notifyLog}'` },
-    encoding: 'utf8', timeout: 20000, input: '',
-  });
-  check('serve con refresh revocado sale con código 2', res.status === 2, `code=${res.status}`);
-  check('mensaje de refresh fallido', /refresh del token falló/.test(res.stderr), res.stderr.split('\n').find((l) => /❌/.test(l)) || '');
-  let nl = '';
-  try { nl = readFileSync(notifyLog, 'utf8'); } catch {}
-  check('notify hook recibió refresh_failed', /refresh_failed\|h/.test(nl), nl.trim());
-  mock.kill();
-  rmSync(stateDir, { recursive: true, force: true });
-}
-
-rmSync(root, { recursive: true, force: true });
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${failed.length === 0 ? '🎉 TODO OK' : `❌ ${failed.length} fallos`} (${results.length - failed.length}/${results.length})`);
-process.exit(failed.length === 0 ? 0 : 1);
+finish(results);
